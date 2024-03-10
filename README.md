@@ -1,2 +1,1 @@
-# linux_enumeration_priv_esc
-An alternative to Linpeas, for enumerating Debian Linux systems and elevating our privileges
+This script is to be used only in an authorized penetration testing engagements, in environments you have permission to test. Ensure you have adequate permission before running this script. The creator assumes no liability for misuse of this script and highly discourages it's misuse.

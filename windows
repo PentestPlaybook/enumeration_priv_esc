@@ -1,0 +1,33 @@
+# Get all running services and their executable paths
+$services = Get-CimInstance -ClassName win32_service | Where-Object {$_.State -eq 'Running'} | Select-Object Name, PathName
+
+foreach ($service in $services) {
+    try {
+        # Extract the executable path, accurately handling paths with or without quotes and parameters
+        $executablePath = if ($service.PathName -match '^"([^"]+)"') { $matches[1] } else { $service.PathName -split ' ' | Select-Object -First 1 }
+
+        # Skip if the path is empty or null
+        if ([string]::IsNullOrWhiteSpace($executablePath)) {
+            continue
+        }
+
+        # Attempt to resolve path and catch permission errors gracefully
+        $resolvedPath = Resolve-Path $executablePath -ErrorAction SilentlyContinue
+        if (-not $resolvedPath) {
+            Write-Output "Unable to access path or path does not exist for service: $($service.Name), Path: $executablePath"
+            continue
+        }
+
+        $icaclsOutput = icacls $resolvedPath.Path
+
+        # Extract and display the specific permissions of interest (Full or Modify) for the Users group
+        if ($icaclsOutput -match 'Users.*?\((F|M)\)') {
+            $permissionsMatch = $matches[0]
+            $permissionsDetail = if ($matches[1] -eq 'F') {'Full'} else {'Modify'}
+            Write-Output "Service: $($service.Name), Path: $executablePath, Permissions for Users group: $permissionsDetail"
+        }
+    } catch {
+        # Generic catch for any other unforeseen errors
+        Write-Output "An error occurred with service: $($service.Name), Error: $_"
+    }
+}

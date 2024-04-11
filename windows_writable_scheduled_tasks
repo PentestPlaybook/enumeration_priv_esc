@@ -1,6 +1,7 @@
 # Cleanup temporary files:
 del initial_output.txt
 del icacls_output.txt
+del input.txt
 
 # Generate output for all of the scheduled tasks:
 schtasks /query /fo LIST /v > input.txt

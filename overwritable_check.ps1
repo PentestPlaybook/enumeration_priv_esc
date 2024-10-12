@@ -25,9 +25,14 @@ function Check-FilePermissions {
         if ($_.IdentityReference -eq $currentUser -and $_.FileSystemRights -match "Write|Modify|FullControl") {
             $canBeOverwritten = $true
         }
+
+        # Add this block to check if the Users group has write/modify permissions
+        if ($_.IdentityReference -match "BUILTIN\\Users" -and $_.FileSystemRights -match "Write|Modify|FullControl") {
+            $canBeOverwritten = $true
+        }
     }
 
-    return @{ IsExecutable = $isExecutable; CanBeOverwritten = $canBeOverwritten }
+    return @{ IsExecutable = $isExecutable; CanBeOverwritten = $canBeOverwritten } 
 }
 
 function Check-Executables {

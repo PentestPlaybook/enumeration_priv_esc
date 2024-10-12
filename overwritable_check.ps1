@@ -26,11 +26,12 @@ function Check-FilePermissions {
             $canBeOverwritten = $true
         }
 
-        # Add this block to check if the Users group has write/modify permissions
+        # Check if the Users group has write/modify permissions
         if ($_.IdentityReference -match "BUILTIN\\Users" -and $_.FileSystemRights -match "Write|Modify|FullControl") {
             $canBeOverwritten = $true
         }
 
+        # Check if the Authenticated Users group has write/modify permissions
         if ($_.IdentityReference -match "NT AUTHORITY\\Authenticated Users" -and $_.FileSystemRights -match "Write|Modify|FullControl") {
             $canBeOverwritten = $true
         }

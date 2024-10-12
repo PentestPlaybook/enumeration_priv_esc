@@ -30,6 +30,11 @@ function Check-FilePermissions {
         if ($_.IdentityReference -match "BUILTIN\\Users" -and $_.FileSystemRights -match "Write|Modify|FullControl") {
             $canBeOverwritten = $true
         }
+
+        if ($_.IdentityReference -match "NT AUTHORITY\\Authenticated Users" -and $_.FileSystemRights -match "Write|Modify|FullControl") {
+            $canBeOverwritten = $true
+        }
+
     }
 
     return @{ IsExecutable = $isExecutable; CanBeOverwritten = $canBeOverwritten } 

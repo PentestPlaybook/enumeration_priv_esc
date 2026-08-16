@@ -1,34 +1,45 @@
-# Function to extract the .exe file names from the Task to Run lines and save to a file
+# Extract executable names from scheduled tasks' "Task To Run:" lines.
 function Extract-ExecutableNamesFromTasks {
-    # Define the output file path
-    $outputDirectory = "C:\Users\steve\output"  # Use a valid existing directory
-    $outputFilePath = "$outputDirectory\scheduled_executables.txt"
+    $outputDirectory = Join-Path $env:USERPROFILE "output"
+    $outputFilePath  = Join-Path $outputDirectory "scheduled_executables.txt"
 
-    # Create the directory if it doesn't exist
     if (-not (Test-Path -Path $outputDirectory)) {
-        New-Item -Path $outputDirectory -ItemType Directory
+        New-Item -Path $outputDirectory -ItemType Directory | Out-Null
     }
+    # Start clean each run.
+    Set-Content -Path $outputFilePath -Value $null
 
-    # Run schtasks command and retrieve output
     $tasks = schtasks /query /fo LIST /v | Select-String -Pattern "Task To Run:"
 
-    # Iterate through the matching lines
     foreach ($line in $tasks) {
-        # Extract the path after "Task To Run:"
-        $taskPath = $line -replace "Task To Run:\s*", ""
+        $taskPath = ($line -replace "Task To Run:\s*", "").Trim()
+        if ($taskPath -eq "") { continue }
 
-        # If the line contains a .exe file, extract the filename
-        if ($taskPath -like "*.exe*") {
-            # Extract the .exe file name by splitting on the last backslash
-            $exeFileName = [System.IO.Path]::GetFileName($taskPath)
+        $exeName = $null
 
-            # Save the .exe file name to the output file
-            Add-Content -Path $outputFilePath -Value $exeFileName
+        # Case 1: quoted path -> take the executable inside the quotes.
+        if ($taskPath -match '^"([^"]+)"') {
+            $exeName = Split-Path $matches[1] -Leaf
+        }
+        # Case 2: an .exe anywhere, possibly followed by args -> grab up to and including .exe.
+        elseif ($taskPath -match '([^\\/:*?"<>|\r\n]+\.exe)') {
+            $exeName = $matches[1]
+        }
+        # Case 3: rundll32/COM style "something.dll,Entry" -> record the dll+entry as-is.
+        elseif ($taskPath -match '([^\\/]+\.dll,[^\s]+)') {
+            $exeName = $matches[1]
+        }
+        # Otherwise: not a resolvable executable (e.g. "source LogonIdleTask") -> skip.
+        else {
+            continue
+        }
+
+        if ($exeName) {
+            Add-Content -Path $outputFilePath -Value $exeName
         }
     }
 
     Write-Output "Executable file names have been saved to $outputFilePath"
 }
 
-# Run the function
 Extract-ExecutableNamesFromTasks

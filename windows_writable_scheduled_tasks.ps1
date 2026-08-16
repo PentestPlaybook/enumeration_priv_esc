@@ -1,92 +1,100 @@
-# Cleanup temporary files:
-del initial_output.txt
-del icacls_output.txt
-del input.txt
+<#
+    Find scheduled-task executables writable by the current user.
+    Writable SYSTEM/admin task binaries are a privesc path: replace the binary,
+    wait for (or trigger) the task, and your code runs in the task's context.
+#>
 
-# Generate output for all of the scheduled tasks:
-schtasks /query /fo LIST /v > input.txt
+# Work in a temp dir so we don't litter the current directory, and so cleanup is trivial.
+$workDir = Join-Path $env:TEMP ("wtask_" + [guid]::NewGuid().ToString("N").Substring(0,8))
+New-Item -ItemType Directory -Path $workDir -Force | Out-Null
 
-# Create a file with all the scheduled task executable paths:
-# Define the path to the input text file
-$inputFilePath = "input.txt"
-$outputFilePath = "initial_output.txt"
+$inputFile   = Join-Path $workDir "input.txt"
+$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+Write-Host "[*] Current user : $currentUser"
+Write-Host "[*] Working dir  : $workDir`n"
 
-# Read the contents of the file
-$fileContents = Get-Content -Path $inputFilePath
+# 1. Dump all scheduled tasks.
+schtasks /query /fo LIST /v > $inputFile 2>$null
 
-# Initialize an empty list to hold the executable paths
-$executablePaths = @()
+# 2. Extract executable paths from each "Task To Run:" line.
+$executablePaths = New-Object System.Collections.Generic.HashSet[string]
 
-# Iterate over each line in the file contents
-foreach ($line in $fileContents) {
-    # Check if the line contains a task execution path
+foreach ($line in Get-Content -Path $inputFile) {
     if ($line -match "Task To Run:\s*(.+)") {
-        # Extract the execution path
-        $executionPath = $matches[1].Trim()
+        $raw = $matches[1].Trim()
 
-        # Resolve environment variables
-        $executionPath = [System.Environment]::ExpandEnvironmentVariables($executionPath)
-        
-        # Exclude command-line arguments (simple approach, consider edge cases)
-        $executionPath = ($executionPath -split ' ')[0]
+        # Expand env vars (%windir%, etc.).
+        $raw = [System.Environment]::ExpandEnvironmentVariables($raw)
 
-        # Exclude non-file path entries like "COM handler" and check for valid file paths
-        if ($executionPath -notmatch "^COM" -and $executionPath -ne $null -and $executionPath -ne "" -and (Test-Path $executionPath)) {
-            # Add the cleaned and resolved execution path to the list
-            $executablePaths += $executionPath
+        # Skip COM-handler tasks — they have no file path.
+        if ($raw -match "^COM handler" -or $raw -eq "") { continue }
+
+        # Pull the executable out, handling quoted paths and trailing arguments.
+        if ($raw -match '^"([^"]+)"') {
+            # Quoted path: take what's inside the quotes.
+            $exePath = $matches[1]
+        }
+        else {
+            # Unquoted: cut at the first arg that starts with / or - (best effort),
+            # otherwise take the first whitespace-delimited token.
+            $exePath = $raw
+            if ($exePath -match '^(.+?\.exe)\b') { $exePath = $matches[1] }
+            else { $exePath = ($raw -split '\s+')[0] }
+        }
+
+        $exePath = $exePath.Trim()
+        if ($exePath -ne "" -and (Test-Path -LiteralPath $exePath -PathType Leaf)) {
+            [void]$executablePaths.Add($exePath)
         }
     }
 }
 
-# Save the list of executable paths to the output file
-$executablePaths | Out-File -FilePath $outputFilePath
-
-
-# Create a file with the icacls command for all scheduled task executable paths:
-
-# Define the path to the input file with paths and the output file for the icacls results
-$inputFilePath1 = "initial_output.txt"
-$outputFilePath1 = "icacls_output.txt"
-
-# Read the paths from the input file
-$paths = Get-Content -Path $inputFilePath1
-
-# Iterate over each path and run icacls, appending the results to the output file
-foreach ($path in $paths) {
-    icacls $path | Out-File -FilePath $outputFilePath1 -Append
+if ($executablePaths.Count -eq 0) {
+    Write-Host "[-] No resolvable task executables found."
+    Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
+    return
 }
 
+Write-Host "[*] Resolved $($executablePaths.Count) unique task executable(s). Checking permissions...`n"
 
-# Run this script (to get the scheduled task executable paths that are executable by the current user)
-# Get the current user name
-$currentUsername = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+# 3. Check each binary's ACL for a write-capable entry for the current user or its groups.
+#    We match (M)odify, (F)ull, (W)rite, and generic-all/write on the identities in the user's token.
+$identity   = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$identityRefs = @($identity.Name)
+$identityRefs += $identity.Groups | ForEach-Object {
+    try { $_.Translate([System.Security.Principal.NTAccount]).Value } catch { $null }
+} | Where-Object { $_ }
 
-# Output the current user in the terminal
-Write-Host "Current user: $currentUsername"
+$writableHits = @()
 
-# Define the path to the file containing the icacls output
-$icaclsOutputPath = "icacls_output.txt"
-
-# Read the contents of the file
-$icaclsOutput = Get-Content -Path $icaclsOutputPath
-
-# Initialize a switch to check if the current user's permissions are being listed
-$checkPermissions = $false
-
-# Go through each line in the output file
-foreach ($line in $icaclsOutput) {
-    # Check if the line contains a file path and reset the permissions check
-    if ($line -match "^[A-Za-z]:\\") {
-        $currentFilePath = $line
-        $checkPermissions = $true
-    }
-
-    # If checking permissions and the line contains the current user with (M) or (F) permissions, output the file path
-    if ($checkPermissions -and $line -like "*$currentUsername*") {
-        if ($line -match "\([MF]\)") {
-            Write-Host $currentFilePath
-            # Reset the check as we only print the file path once for each user's (M)odify or (F)ull control permission
-            $checkPermissions = $false
+foreach ($path in $executablePaths) {
+    $acl = icacls $path 2>$null
+    foreach ($aclLine in $acl) {
+        foreach ($ref in $identityRefs) {
+            if ($aclLine -like "*$ref*" -and $aclLine -match "\((?:[^)]*[MFW][^)]*)\)") {
+                # Extract the permission token(s) shown for readability.
+                $perm = ([regex]::Matches($aclLine, "\(([^)]+)\)") | ForEach-Object { $_.Groups[1].Value }) -join ""
+                $writableHits += [pscustomobject]@{
+                    Path       = $path
+                    Identity   = $ref
+                    Permission = $perm
+                }
+            }
         }
     }
 }
+
+# 4. Report, deduped.
+if ($writableHits.Count -eq 0) {
+    Write-Host "[-] No task executables are writable by the current user or its groups."
+}
+else {
+    Write-Host "[+] Writable task executables found:`n"
+    $writableHits |
+        Sort-Object Path, Identity -Unique |
+        Format-Table -AutoSize Path, Identity, Permission
+    Write-Host "`n[!] To exploit: back up the original, replace it with your payload, then wait for or trigger the task."
+}
+
+# 5. Clean up — always, and without erroring.
+Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue

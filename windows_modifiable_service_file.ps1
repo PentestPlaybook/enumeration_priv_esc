@@ -36,13 +36,16 @@ if ($tempService.Count -gt 0) {
     $services += $tempService
 }
 
-# Filter services based on criteria: ModifiableFile is not C:\, and CanRestart is True
+# Filter services: any service whose binary (not just C:\) is modifiable
 $vulnerableServices = $services | Where-Object {
-    $_.ModifiableFile -ne 'C:\' -and
-    $_.CanRestart -eq 'True'
+    $_.ModifiableFile -ne 'C:\'
 }
 
-# Output vulnerable services
-foreach ($service in $vulnerableServices) {
-    Write-Output "Vulnerable Service Found: $($service.ServiceName) with Modifiable Path: $($service.ModifiableFile)"
+# Output results, with an explicit status so the script never returns silently
+if ($vulnerableServices) {
+    foreach ($service in $vulnerableServices) {
+        Write-Output "Vulnerable Service Found: $($service.ServiceName) | Modifiable Binary: $($service.ModifiableFile) | CanRestart: $($service.CanRestart)"
+    }
+} else {
+    Write-Output "No services with a modifiable binary found."
 }

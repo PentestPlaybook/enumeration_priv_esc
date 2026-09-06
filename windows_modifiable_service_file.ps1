@@ -12,20 +12,25 @@ if (-not (Test-Path $filePath)) {
 
 $fileContent = Get-Content $filePath
 
-# --- Parse PowerUp output into service objects ---
-$services   = @()
-$tempService = @{}
+# --- Parse PowerUp output into service objects (PSCustomObjects, not hashtables) ---
+$services = [System.Collections.Generic.List[object]]::new()
+$cur = $null
+
+function Flush-Current {
+    param($obj)
+    if ($obj -and $obj.ServiceName) { $script:services.Add([pscustomobject]$obj) }
+}
 
 foreach ($line in $fileContent) {
     if ($line -match "ServiceName\s+:\s+(.+)") {
-        if ($tempService.Count -gt 0) { $services += $tempService; $tempService = @{} }
-        $tempService["ServiceName"] = $matches[1].Trim()
+        Flush-Current $cur
+        $cur = @{ ServiceName = $matches[1].Trim(); Path = ''; ModifiableFile = ''; CanRestart = '' }
     }
-    elseif ($line -match "^Path\s+:\s+(.+)")           { $tempService["Path"]           = $matches[1].Trim() }
-    elseif ($line -match "ModifiableFile\s+:\s+(.+)")  { $tempService["ModifiableFile"] = $matches[1].Trim() }
-    elseif ($line -match "CanRestart\s+:\s+(.+)")      { $tempService["CanRestart"]     = $matches[1].Trim() }
+    elseif ($cur -and $line -match "^Path\s+:\s+(.+)")          { $cur.Path           = $matches[1].Trim() }
+    elseif ($cur -and $line -match "ModifiableFile\s+:\s+(.+)") { $cur.ModifiableFile = $matches[1].Trim() }
+    elseif ($cur -and $line -match "CanRestart\s+:\s+(.+)")     { $cur.CanRestart     = $matches[1].Trim() }
 }
-if ($tempService.Count -gt 0) { $services += $tempService }
+Flush-Current $cur
 
 # Keep only services whose flagged file is an actual binary (drop the 'C:\' drive-root noise),
 # and de-duplicate by service name (PowerUp lists some services twice).
@@ -38,12 +43,14 @@ if (-not $services) {
     return
 }
 
-# --- Work out which identities the current user effectively is ---
-$me         = (whoami)
-$myGroups   = @('BUILTIN\Users','NT AUTHORITY\Authenticated Users','Everyone', $me)
+# --- Identities the current user effectively is (for a rough effective-rights check) ---
+$me       = (whoami)
+$myGroups = @('BUILTIN\Users','NT AUTHORITY\Authenticated Users','Everyone', $me)
 
-# Helper: given a file path, return what the current user can do to it.
-# Returns one of: 'Replace' (can rename+drop), 'Overwrite' (can only overwrite contents), 'None'
+# Given a file path, return what the current user can do to it:
+#   'Replace'   -> holds Delete/Modify/Full: can rename+drop a new binary
+#   'Overwrite' -> only Write: can overwrite contents in place
+#   'None'
 function Get-MyFileCapability($path) {
     if (-not (Test-Path $path)) { return 'None' }
     try { $acl = Get-Acl $path } catch { return 'None' }
@@ -56,22 +63,23 @@ function Get-MyFileCapability($path) {
         }
     }
 
-    $DELETE   = 0x00010000
-    $FULL     = 0x001F01FF
-    $MODIFY   = 0x000301BF
-    $WRITEDATA= 0x00000002
-    $APPEND   = 0x00000004
+    $DELETE    = 0x00010000
+    $FULL      = 0x001F01FF
+    $MODIFY    = 0x000301BF
+    $WRITEDATA = 0x00000002
+    $APPEND    = 0x00000004
 
-    if ( ($rights -band $FULL)  -eq $FULL  -or
-         ($rights -band $MODIFY) -eq $MODIFY -or
-         ($rights -band $DELETE) ) { return 'Replace' }        # has Delete -> can move/rename+replace
-    if ( $rights -band ($WRITEDATA -bor $APPEND) ) { return 'Overwrite' }  # can only overwrite in place
+    if ( (($rights -band $FULL)   -eq $FULL)   -or
+         (($rights -band $MODIFY) -eq $MODIFY) -or
+         ($rights -band $DELETE) ) { return 'Replace' }
+    if ( $rights -band ($WRITEDATA -bor $APPEND) ) { return 'Overwrite' }
     return 'None'
 }
 
 # --- Enrich each service with live state and report a verdict ---
-"{0,-16} {1,-9} {2,-8} {3,-14} {4}" -f 'SERVICE','STATE','START','FILE-ACCESS','VERDICT'
-"{0,-16} {1,-9} {2,-8} {3,-14} {4}" -f '-------','-----','-----','-----------','-------'
+$fmt = "{0,-16} {1,-9} {2,-8} {3,-11} {4}"
+$fmt -f 'SERVICE','STATE','START','FILE-ACC','VERDICT'
+$fmt -f '-------','-----','-----','--------','-------'
 
 foreach ($svc in $services) {
     $name = $svc.ServiceName
@@ -81,18 +89,15 @@ foreach ($svc in $services) {
     $start = if ($cim) { $cim.StartMode } else { 'Unknown' }
     $cap   = Get-MyFileCapability $svc.ModifiableFile
 
-    # Verdict logic:
-    #  - Must be able to place a payload (Replace or Overwrite)
-    #  - Must have a trigger: Auto start -> a reboot relaunches it as its StartName account
     if ($cap -eq 'None') {
-        $verdict = "NOT usable - you can't write the binary"
+        $verdict = "NOT usable - can't write the binary"
     }
     elseif ($start -eq 'Auto') {
-        $verdict = "EXPLOITABLE - $cap binary, Auto-start => replace + reboot"
+        $verdict = "EXPLOITABLE - $cap binary + Auto-start => replace + reboot"
     }
     else {
-        $verdict = "PARTIAL - $cap binary, but $start start (need a way to start it; reboot won't)"
+        $verdict = "PARTIAL - $cap binary, $start start (need a trigger; reboot won't launch it)"
     }
 
-    "{0,-16} {1,-9} {2,-8} {3,-14} {4}" -f $name, $state, $start, $cap, $verdict
+    $fmt -f $name, $state, $start, $cap, $verdict
 }

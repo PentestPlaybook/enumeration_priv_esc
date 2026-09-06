@@ -92,11 +92,14 @@ foreach ($svc in $services) {
     if ($cap -eq 'None') {
         $verdict = "NOT usable - can't write the binary"
     }
+    elseif ($svc.CanRestart -eq 'True') {
+        $verdict = "EXPLOITABLE - $cap binary + you can restart it => replace + net stop/start (no reboot)"
+    }
     elseif ($start -eq 'Auto') {
-        $verdict = "EXPLOITABLE - $cap binary + Auto-start => replace + reboot"
+        $verdict = "EXPLOITABLE - $cap binary + Auto-start (can't restart) => replace + reboot"
     }
     else {
-        $verdict = "PARTIAL - $cap binary, $start start (need a trigger; reboot won't launch it)"
+        $verdict = "PARTIAL - $cap binary, $start start, can't restart (need a trigger; reboot won't launch it)"
     }
 
     $fmt -f $name, $state, $start, $cap, $verdict
